@@ -1,22 +1,22 @@
-FROM alpine:3.20.3 AS stage
-LABEL maintainer="Nicolas Favre-Felix <n.favrefelix@gmail.com>"
+FROM alpine:edge AS stage
 
-RUN apk update && apk add wget make gcc libevent-dev msgpack-c-dev musl-dev openssl-dev bsd-compat-headers jq
-RUN wget -q https://api.github.com/repos/nicolasff/webdis/tags -O /dev/stdout | jq '.[] | .name' | head -1  | sed 's/"//g' > latest
-RUN wget https://github.com/nicolasff/webdis/archive/$(cat latest).tar.gz -O webdis-latest.tar.gz
-RUN tar -xvzf webdis-latest.tar.gz
-RUN cd webdis-$(cat latest) && make && make install && make clean && make SSL=1 && cp webdis /usr/local/bin/webdis-ssl && cd ..
-RUN sed -i -e 's/"daemonize":.*true,/"daemonize": false,/g' /etc/webdis.prod.json
+RUN \
+  apk update && apk add curl make clang libevent-dev msgpack-c-dev musl-dev bsd-compat-headers jq && \
+  LATEST=$(curl -SsL https://api.github.com/repos/nicolasff/webdis/tags | jq '.[] | .name' | head -1 | sed 's/"//g') && \
+  curl -SsL https://github.com/nicolasff/webdis/archive/${LATEST}.tar.gz | tar -xz && \
+  cd webdis-${LATEST} && CC=clang make -j$(nproc) && make install && make clean
 
 # main image
-FROM alpine:3.20.3
-# Required dependencies, with versions fixing known security vulnerabilities
-RUN apk update && apk add libevent msgpack-c openssl \
-    'redis>=6.2.10' 'libssl3>=3.2.2-r1' 'libcrypto3>=3.3.2-r1' && \
-    rm -f /var/cache/apk/* /usr/bin/redis-benchmark /usr/bin/redis-cli
-COPY --from=stage /usr/local/bin/webdis /usr/local/bin/webdis-ssl /usr/local/bin/
-COPY --from=stage /etc/webdis.prod.json /etc/webdis.prod.json
-RUN echo "daemonize yes" >> /etc/redis.conf
-CMD ["/bin/sh", "-c", "/usr/bin/redis-server /etc/redis.conf && /usr/local/bin/webdis /etc/webdis.prod.json"]
+FROM alpine:edge
+
+RUN \
+  apk update && apk add libevent valkey && \
+  rm -f /var/cache/apk/* /usr/bin/valkey-check-aof /usr/bin/valkey-check-rdb /usr/bin/valkey-sentinel && \
+  echo "daemonize yes" >> /etc/valkey/valkey.conf
+
+COPY --from=stage /usr/local/bin/webdis /usr/local/bin/
+COPY webdis.json /etc/webdis.json
+
+CMD ["/bin/sh", "-c", "if [ -z \"${WEBDIS_AUTH}\" ]; then echo \"WEBDIS_AUTH is empty\"; exit 1; fi && sed -i \"s/BASICAUTH/${WEBDIS_AUTH}/g\" /etc/webdis.json && /usr/bin/valkey-server /etc/valkey/valkey.conf && /usr/local/bin/webdis /etc/webdis.json"]
 
 EXPOSE 7379
